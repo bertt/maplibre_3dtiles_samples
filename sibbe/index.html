@@ -239,12 +239,15 @@ async function load3dtiles(url, altOffset = 0) {
       varying float vId;
       void main() {
         if (abs(vId - selectedId) > 0.5) discard;
-        gl_FragColor = vec4(1.0, 0.50, 0.05, 0.65);
+        gl_FragColor = vec4(1.0, 0.92, 0.2, 0.75);
       }
     `,
     transparent: true,
-    depthTest: false,
+    depthTest: true,
     depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1.0,
+    polygonOffsetUnits: -1.0,
     side: THREE.DoubleSide,
   });
   let selectionMesh = null;

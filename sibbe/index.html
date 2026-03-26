@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Sibbe 3D Panden</title>
+  <script src="https://unpkg.com/maplibre-gl@5.21.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@5.21.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    body { margin: 0; padding: 0; }
+    html, body, #map { height: 100%; }
+
+    #loading {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(255,255,255,0.92); padding: 14px 22px;
+      border-radius: 8px; font-family: sans-serif; font-size: 14px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.25); z-index: 10;
+      display: flex; align-items: center; gap: 10px;
+    }
+    #loading::before {
+      content: ''; width: 16px; height: 16px; border-radius: 50%;
+      border: 3px solid #ccc; border-top-color: #0078ff;
+      animation: spin .8s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #credits {
+      position: absolute; bottom: 30px; left: 10px;
+      background: rgba(255,255,255,0.85); padding: 6px 10px;
+      border-radius: 4px; font-family: sans-serif; font-size: 11px;
+      line-height: 1.6; z-index: 5; max-width: 300px;
+    }
+    #credits a { color: #0078ff; text-decoration: none; }
+    #credits a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
+    "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/",
+    "3d-tiles-renderer": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.21/build/index.three.js",
+    "3d-tiles-renderer/core/plugins": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.21/build/index.core-plugins.js"
+  }
+}
+</script>
+
+<div id="map"></div>
+<div id="loading">Laden van 3D panden&hellip;</div>
+<div id="credits">
+  🏠 <strong>Sibbe 3D Panden</strong><br>
+  Kaart: <a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> &middot;
+  Terrain: <a href="https://mapterhorn.com" target="_blank">Mapterhorn</a><br>
+  3D data: BAG via <a href="https://github.com/Geodan/pg2b3dm" target="_blank">pg2b3dm</a>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { TilesRenderer } from '3d-tiles-renderer';
+import { ImplicitTilingPlugin } from '3d-tiles-renderer/core/plugins';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+
+let scene, camera, renderer, mapInstance, tiles, tilesCamera;
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/liberty',
+  zoom: 1,
+  center: [0, 0],
+  pitch: 60,
+  maxPitch: 80,
+  canvasContextAttributes: { antialias: true }
+});
+
+// Convert ECEF Cartesian to latitude / longitude / altitude
+function ecefToLngLatAlt(x, y, z) {
+  const a = 6378137.0;
+  const e2 = 6.69437999014e-3;
+  const b = a * Math.sqrt(1 - e2);
+  const ep2 = (a * a - b * b) / (b * b);
+  const p = Math.sqrt(x * x + y * y);
+  const th = Math.atan2(a * z, b * p);
+  const lon = Math.atan2(y, x);
+  const lat = Math.atan2(z + ep2 * b * Math.pow(Math.sin(th), 3), p - e2 * a * Math.pow(Math.cos(th), 3));
+  const n = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
+  const alt = p / Math.cos(lat) - n;
+  return { lng: (lon * 180) / Math.PI, lat: (lat * 180) / Math.PI, alt };
+}
+
+async function load3dtiles(url, altOffset = 0) {
+  let localTransform;
+
+  function getModelTransform(coord, rotate = [Math.PI / 2, 0, 0]) {
+    const mc = maplibregl.MercatorCoordinate.fromLngLat([coord[0], coord[1]], coord[2]);
+    return {
+      translateX: mc.x, translateY: mc.y, translateZ: mc.z,
+      rotateX: rotate[0], rotateY: rotate[1], rotateZ: rotate[2],
+      scale: mc.meterInMercatorCoordinateUnits()
+    };
+  }
+
+  function updateLocalTransform(modelOrigin = [0, 0, 0]) {
+    const mt = getModelTransform(modelOrigin);
+    const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), mt.rotateX);
+    const rotationY = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 1, 0), mt.rotateY);
+    const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), mt.rotateZ);
+    localTransform = new THREE.Matrix4()
+      .makeTranslation(mt.translateX, mt.translateY, mt.translateZ)
+      .scale(new THREE.Vector3(mt.scale, -mt.scale, mt.scale))
+      .multiply(rotationX)
+      .multiply(rotationY)
+      .multiply(rotationZ);
+  }
+
+  function initTiles(url, sceneInst, cameraInst, rendererInst) {
+    const gltfLoader = new GLTFLoader();
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('https://unpkg.com/three@0.183.0/examples/jsm/libs/draco/');
+    gltfLoader.setDRACOLoader(dracoLoader);
+
+    const ktx2Loader = new KTX2Loader();
+    ktx2Loader.setTranscoderPath('https://unpkg.com/three@0.183.0/examples/jsm/libs/basis/');
+    ktx2Loader.detectSupport(rendererInst);
+    gltfLoader.setKTX2Loader(ktx2Loader);
+
+    tiles = new TilesRenderer(url);
+    // ImplicitTilingPlugin is required for 3D Tiles 1.1 implicit tiling
+    // (template URIs like {level}_{x}_{y} are only resolved with this plugin)
+    tiles.registerPlugin(new ImplicitTilingPlugin());
+    tiles.group.name = 'tiles';
+    sceneInst.add(tiles.group);
+
+    tiles.setCamera(cameraInst);
+    tiles.setResolutionFromRenderer(cameraInst, rendererInst);
+    tiles.manager.addHandler(/\.(gltf|glb)$/g, gltfLoader);
+
+    let loadedTileSetHandled = false;
+    const loadTileSet = () => {
+      if (loadedTileSetHandled) {
+        tiles?.removeEventListener('load-tileset', loadTileSet);
+        return;
+      }
+
+      const sphere = new THREE.Sphere();
+      tiles.getBoundingSphere(sphere);
+      const center = sphere.center.clone();
+      loadedTileSetHandled = true;
+
+      const { lng, lat, alt } = ecefToLngLatAlt(center.x, center.y, center.z);
+      map.jumpTo({ center: [lng, lat], zoom: 16, pitch: 60, bearing: -20 });
+      updateLocalTransform([lng, lat, alt + altOffset]);
+
+      // Compute proper ENU→Three.js rotation at the ECEF center position.
+      // The pg2b3dm tileset transform is translation-only (no ENU axes in columns),
+      // so the standard extraction from m[] gives wrong results for EPSG:4978 data.
+      const lonRad = lng * Math.PI / 180;
+      const latRad = lat * Math.PI / 180;
+      const sLon = Math.sin(lonRad), cLon = Math.cos(lonRad);
+      const sLat = Math.sin(latRad), cLat = Math.cos(latRad);
+      // Each row maps an ECEF direction to a Three.js axis:
+      //   East   → +X,  Up → +Y,  -North → +Z
+      const rotationMat4 = new THREE.Matrix4().setFromMatrix3(
+        new THREE.Matrix3().set(
+          -sLon,        cLon,        0,
+           cLat * cLon, cLat * sLon, sLat,
+           sLat * cLon, sLat * sLon, -cLat
+        )
+      );
+      const moveToOrigin = new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z);
+      const finalMatrix = new THREE.Matrix4().multiplyMatrices(rotationMat4, moveToOrigin);
+
+      tiles.group.matrix.copy(finalMatrix);
+      tiles.group.matrixAutoUpdate = false;
+      tiles.group.updateMatrixWorld(true);
+
+      document.getElementById('loading').style.display = 'none';
+    };
+    tiles.addEventListener('load-tileset', loadTileSet);
+
+    updateLocalTransform();
+  }
+
+  const customLayer = {
+    id: '3d-tiles',
+    type: 'custom',
+    renderingMode: '3d',
+    onAdd(mapArg, gl) {
+      camera = new THREE.PerspectiveCamera();
+      scene = new THREE.Scene();
+
+      // Soft ambient fill + directional sun light in local ENU space (East=+X, Up=+Y, South=+Z)
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+      sun.position.set(1, 2, 0.5); // from northeast, high elevation
+      scene.add(sun);
+
+      mapInstance = mapArg;
+      renderer = new THREE.WebGLRenderer({ canvas: mapArg.getCanvas(), context: gl, antialias: true });
+      renderer.autoClear = false;
+
+      tilesCamera = new THREE.PerspectiveCamera();
+      initTiles(url, scene, tilesCamera, renderer);
+    },
+    render(_gl, args) {
+      if (!camera || !renderer || !scene || !localTransform || !tilesCamera) return;
+      camera.projectionMatrix.fromArray(args.defaultProjectionData.mainMatrix);
+      camera.projectionMatrix.multiply(localTransform);
+
+      const P = new THREE.Matrix4().fromArray(args.projectionMatrix);
+      const invP = P.clone().invert();
+      const V = new THREE.Matrix4().multiplyMatrices(invP, camera.projectionMatrix);
+
+      tilesCamera.projectionMatrix.copy(P);
+      tilesCamera.matrixWorldInverse.copy(V);
+      tilesCamera.matrixWorld.copy(V).invert();
+
+      renderer.resetState();
+      renderer.render(scene, camera);
+      if (tiles) tiles.update();
+      mapInstance?.triggerRepaint();
+    }
+  };
+
+  await map.once('style.load');
+
+  // Add Mapterhorn terrain to the OpenFreeMap style
+  map.addSource('terrain-dem', {
+    type: 'raster-dem',
+    url: 'https://tiles.mapterhorn.com/tilejson.json'
+  });
+  map.addLayer({
+    id: 'hillshading',
+    type: 'hillshade',
+    source: 'terrain-dem',
+    paint: { 'hillshade-shadow-color': '#473B24', 'hillshade-exaggeration': 0.5 }
+  });
+  map.setTerrain({ source: 'terrain-dem', exaggeration: 1 });
+
+  // Hide vector tile building layers so they don't overlap the 3D Tiles buildings
+  map.getStyle().layers
+    .filter(l => l.id.includes('building'))
+    .forEach(l => map.setLayoutProperty(l.id, 'visibility', 'none'));
+
+  map.addLayer(customLayer);
+}
+
+load3dtiles('./sibbe/tileset.json');
+</script>
+</body>
+</html>

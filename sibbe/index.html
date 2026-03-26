@@ -33,6 +33,15 @@
     }
     #credits a { color: #0078ff; text-decoration: none; }
     #credits a:hover { text-decoration: underline; }
+
+    #info {
+      display: none;
+      position: fixed;
+      background: rgba(255,255,255,0.95); padding: 8px 12px;
+      border-radius: 6px; font-family: sans-serif; font-size: 12px;
+      line-height: 1.7; z-index: 20; max-width: 280px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.25); pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -42,14 +51,16 @@
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
     "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/",
-    "3d-tiles-renderer": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.21/build/index.three.js",
-    "3d-tiles-renderer/core/plugins": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.21/build/index.core-plugins.js"
+    "3d-tiles-renderer": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.23/build/index.three.js",
+    "3d-tiles-renderer/core/plugins": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.23/build/index.core-plugins.js",
+    "3d-tiles-renderer/three/plugins": "https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.23/build/index.three-plugins.js"
   }
 }
 </script>
 
 <div id="map"></div>
 <div id="loading">Laden van 3D panden&hellip;</div>
+<div id="info"></div>
 <div id="credits">
   🏠 <strong>Sibbe 3D Panden</strong><br>
   Kaart: <a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> &middot;
@@ -61,7 +72,7 @@
 import * as THREE from 'three';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { ImplicitTilingPlugin } from '3d-tiles-renderer/core/plugins';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFExtensionsPlugin } from '3d-tiles-renderer/three/plugins';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 
@@ -77,93 +88,59 @@ const map = new maplibregl.Map({
   canvasContextAttributes: { antialias: true }
 });
 
-// Convert ECEF Cartesian to latitude / longitude / altitude
-function ecefToLngLatAlt(x, y, z) {
-  const a = 6378137.0;
-  const e2 = 6.69437999014e-3;
-  const b = a * Math.sqrt(1 - e2);
-  const ep2 = (a * a - b * b) / (b * b);
-  const p = Math.sqrt(x * x + y * y);
-  const th = Math.atan2(a * z, b * p);
-  const lon = Math.atan2(y, x);
-  const lat = Math.atan2(z + ep2 * b * Math.pow(Math.sin(th), 3), p - e2 * a * Math.pow(Math.cos(th), 3));
-  const n = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
-  const alt = p / Math.cos(lat) - n;
-  return { lng: (lon * 180) / Math.PI, lat: (lat * 180) / Math.PI, alt };
-}
-
 async function load3dtiles(url, altOffset = 0) {
   let localTransform;
 
-  function getModelTransform(coord, rotate = [Math.PI / 2, 0, 0]) {
-    const mc = maplibregl.MercatorCoordinate.fromLngLat([coord[0], coord[1]], coord[2]);
-    return {
-      translateX: mc.x, translateY: mc.y, translateZ: mc.z,
-      rotateX: rotate[0], rotateY: rotate[1], rotateZ: rotate[2],
-      scale: mc.meterInMercatorCoordinateUnits()
-    };
-  }
-
   function updateLocalTransform(modelOrigin = [0, 0, 0]) {
-    const mt = getModelTransform(modelOrigin);
-    const rotationX = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(1, 0, 0), mt.rotateX);
-    const rotationY = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 1, 0), mt.rotateY);
-    const rotationZ = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(0, 0, 1), mt.rotateZ);
+    const mc = maplibregl.MercatorCoordinate.fromLngLat([modelOrigin[0], modelOrigin[1]], modelOrigin[2]);
+    const s = mc.meterInMercatorCoordinateUnits();
     localTransform = new THREE.Matrix4()
-      .makeTranslation(mt.translateX, mt.translateY, mt.translateZ)
-      .scale(new THREE.Vector3(mt.scale, -mt.scale, mt.scale))
-      .multiply(rotationX)
-      .multiply(rotationY)
-      .multiply(rotationZ);
+      .makeTranslation(mc.x, mc.y, mc.z)
+      .scale(new THREE.Vector3(s, -s, s))
+      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
   }
 
   function initTiles(url, sceneInst, cameraInst, rendererInst) {
-    const gltfLoader = new GLTFLoader();
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath('https://unpkg.com/three@0.183.0/examples/jsm/libs/draco/');
-    gltfLoader.setDRACOLoader(dracoLoader);
 
     const ktx2Loader = new KTX2Loader();
     ktx2Loader.setTranscoderPath('https://unpkg.com/three@0.183.0/examples/jsm/libs/basis/');
     ktx2Loader.detectSupport(rendererInst);
-    gltfLoader.setKTX2Loader(ktx2Loader);
 
     tiles = new TilesRenderer(url);
-    // ImplicitTilingPlugin is required for 3D Tiles 1.1 implicit tiling
-    // (template URIs like {level}_{x}_{y} are only resolved with this plugin)
     tiles.registerPlugin(new ImplicitTilingPlugin());
+    // GLTFExtensionsPlugin sets up DRACOLoader/KTX2Loader and registers
+    // EXT_structural_metadata + EXT_mesh_features for attribute queries
+    tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader, ktxLoader: ktx2Loader }));
+
     tiles.group.name = 'tiles';
     sceneInst.add(tiles.group);
-
     tiles.setCamera(cameraInst);
     tiles.setResolutionFromRenderer(cameraInst, rendererInst);
-    tiles.manager.addHandler(/\.(gltf|glb)$/g, gltfLoader);
 
     let loadedTileSetHandled = false;
-    const loadTileSet = () => {
-      if (loadedTileSetHandled) {
-        tiles?.removeEventListener('load-tileset', loadTileSet);
-        return;
-      }
+    tiles.addEventListener('load-tileset', () => {
+      if (loadedTileSetHandled) return;
+      loadedTileSetHandled = true;
 
       const sphere = new THREE.Sphere();
       tiles.getBoundingSphere(sphere);
       const center = sphere.center.clone();
-      loadedTileSetHandled = true;
 
-      const { lng, lat, alt } = ecefToLngLatAlt(center.x, center.y, center.z);
+      // Convert ECEF centre to geographic coords via the ellipsoid built into the renderer
+      const cart = {};
+      tiles.ellipsoid.getPositionToCartographic(center, cart);
+      const lng = cart.lon * (180 / Math.PI);
+      const lat = cart.lat * (180 / Math.PI);
+      const alt = cart.height + altOffset;
+
       map.jumpTo({ center: [lng, lat], zoom: 16, pitch: 60, bearing: -20 });
-      updateLocalTransform([lng, lat, alt + altOffset]);
+      updateLocalTransform([lng, lat, alt]);
 
-      // Compute proper ENU→Three.js rotation at the ECEF center position.
-      // The pg2b3dm tileset transform is translation-only (no ENU axes in columns),
-      // so the standard extraction from m[] gives wrong results for EPSG:4978 data.
-      const lonRad = lng * Math.PI / 180;
-      const latRad = lat * Math.PI / 180;
-      const sLon = Math.sin(lonRad), cLon = Math.cos(lonRad);
-      const sLat = Math.sin(latRad), cLat = Math.cos(latRad);
-      // Each row maps an ECEF direction to a Three.js axis:
-      //   East   → +X,  Up → +Y,  -North → +Z
+      // ENU→Three.js rotation: East→+X, Up→+Y, South→+Z
+      const sLon = Math.sin(cart.lon), cLon = Math.cos(cart.lon);
+      const sLat = Math.sin(cart.lat), cLat = Math.cos(cart.lat);
       const rotationMat4 = new THREE.Matrix4().setFromMatrix3(
         new THREE.Matrix3().set(
           -sLon,        cLon,        0,
@@ -172,15 +149,12 @@ async function load3dtiles(url, altOffset = 0) {
         )
       );
       const moveToOrigin = new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z);
-      const finalMatrix = new THREE.Matrix4().multiplyMatrices(rotationMat4, moveToOrigin);
-
-      tiles.group.matrix.copy(finalMatrix);
+      tiles.group.matrix.copy(new THREE.Matrix4().multiplyMatrices(rotationMat4, moveToOrigin));
       tiles.group.matrixAutoUpdate = false;
       tiles.group.updateMatrixWorld(true);
 
       document.getElementById('loading').style.display = 'none';
-    };
-    tiles.addEventListener('load-tileset', loadTileSet);
+    });
 
     updateLocalTransform();
   }
@@ -216,6 +190,7 @@ async function load3dtiles(url, altOffset = 0) {
       const V = new THREE.Matrix4().multiplyMatrices(invP, camera.projectionMatrix);
 
       tilesCamera.projectionMatrix.copy(P);
+      tilesCamera.projectionMatrixInverse.copy(P).invert();
       tilesCamera.matrixWorldInverse.copy(V);
       tilesCamera.matrixWorld.copy(V).invert();
 
@@ -247,6 +222,93 @@ async function load3dtiles(url, altOffset = 0) {
     .forEach(l => map.setLayoutProperty(l.id, 'visibility', 'none'));
 
   map.addLayer(customLayer);
+
+  // --- Selection shader: only renders the selected feature ID in orange ---
+  const selectionMaterial = new THREE.ShaderMaterial({
+    uniforms: { selectedId: { value: -1.0 } },
+    vertexShader: `
+      attribute float _feature_id_0;
+      varying float vId;
+      void main() {
+        vId = _feature_id_0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float selectedId;
+      varying float vId;
+      void main() {
+        if (abs(vId - selectedId) > 0.5) discard;
+        gl_FragColor = vec4(1.0, 0.50, 0.05, 0.65);
+      }
+    `,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  let selectionMesh = null;
+
+  // --- Attribute query via click + raycast ---
+  const raycaster = new THREE.Raycaster();
+  const infoEl = document.getElementById('info');
+
+  map.getCanvas().addEventListener('click', e => {
+    if (!tiles || !tilesCamera || !scene) return;
+    const canvas = map.getCanvas();
+    const ndc = new THREE.Vector2(
+      (e.offsetX / canvas.clientWidth) * 2 - 1,
+      -(e.offsetY / canvas.clientHeight) * 2 + 1
+    );
+    raycaster.setFromCamera(ndc, tilesCamera);
+    const hits = raycaster.intersectObject(tiles.group, true);
+    if (!hits.length) { infoEl.style.display = 'none'; return; }
+
+    const { face, point, faceIndex, object } = hits[0];
+    const meshFeatures = object.userData?.meshFeatures;
+    const structuralMetadata = object.userData?.structuralMetadata;
+    if (!meshFeatures || !structuralMetadata) { infoEl.style.display = 'none'; return; }
+
+    const barycoord = new THREE.Vector3();
+    const tri = new THREE.Triangle();
+    tri.setFromAttributeAndIndices(object.geometry.attributes.position, face.a, face.b, face.c);
+    tri.a.applyMatrix4(object.matrixWorld);
+    tri.b.applyMatrix4(object.matrixWorld);
+    tri.c.applyMatrix4(object.matrixWorld);
+    tri.getBarycoord(point, barycoord);
+
+    // getFeatures returns Array<number|null>; featureInfo links each slot to a property table
+    const featureIds = meshFeatures.getFeatures(faceIndex, barycoord);
+    const featureInfo = meshFeatures.getFeatureInfo();
+    const lines = [];
+    featureIds.forEach((featureId, i) => {
+      if (featureId === null) return;
+      const tableIndex = featureInfo[i]?.propertyTable;
+      if (tableIndex == null) return;
+      const props = structuralMetadata.getPropertyTableData(tableIndex, featureId);
+      if (props) Object.entries(props).forEach(([k, v]) => lines.push(`<b>${k}</b>: ${v}`));
+    });
+
+    // Highlight the selected building using the feature ID shader overlay
+    if (selectionMesh) scene.remove(selectionMesh);
+    const primaryFeatureId = featureIds.find(id => id !== null);
+    if (primaryFeatureId !== null && primaryFeatureId !== undefined) {
+      selectionMaterial.uniforms.selectedId.value = primaryFeatureId;
+      selectionMesh = new THREE.Mesh(object.geometry, selectionMaterial);
+      selectionMesh.renderOrder = 1;
+      selectionMesh.matrixAutoUpdate = false;
+      selectionMesh.matrix.copy(object.matrixWorld);
+      selectionMesh.matrixWorld.copy(object.matrixWorld);
+      scene.add(selectionMesh);
+    }
+
+    infoEl.innerHTML = lines.length ? lines.join('<br>') : 'Geen attributen gevonden';
+    infoEl.style.display = 'block';
+    infoEl.style.left = (e.clientX + 12) + 'px';
+    infoEl.style.top = (e.clientY - 10) + 'px';
+  });
+
+  map.on('movestart', () => { infoEl.style.display = 'none'; });
 }
 
 load3dtiles('./sibbe/tileset.json');

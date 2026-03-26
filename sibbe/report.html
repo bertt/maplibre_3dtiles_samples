@@ -142,8 +142,8 @@
         </tr>
         <tr>
           <td><strong>Click buildings for attributes</strong></td>
-          <td><span class="badge badge-blue">Not implemented</span></td>
-          <td>See technical note below</td>
+          <td><span class="badge badge-green">✓ Done</span></td>
+          <td>Raycast via <code>THREE.Raycaster</code> + <code>tilesCamera</code>; attributes via <code>GLTFExtensionsPlugin</code> (<code>EXT_structural_metadata</code> / <code>EXT_mesh_features</code>); selected building highlighted in orange via feature-ID shader overlay</td>
         </tr>
         <tr>
           <td><strong>GitHub Pages compatible</strong></td>
@@ -156,27 +156,30 @@
 
   <!-- Click functionality -->
   <section>
-    <h2>Clicking buildings – assessment</h2>
+    <h2>Clicking buildings – implementation</h2>
     <div class="card">
-      <h3>What would be required</h3>
+      <h3>How it works</h3>
       <p>
-        Clicking on buildings to query attributes requires combining three mechanisms:
-        a Three.js <code>Raycaster</code> synchronised with the MapLibre camera matrices,
-        reading the per-vertex feature ID from the <code>EXT_mesh_features</code> geometry attribute
-        (<code>_FEATURE_ID_0</code>), and parsing the binary property table from
-        <code>EXT_structural_metadata</code> to look up the <code>identificatie</code> (BAG building ID).
-        All three extensions are present in the GLB tile files.
+        Clicking a building fires a <code>THREE.Raycaster</code> against <code>tiles.group</code>
+        using <code>tilesCamera</code> (which has properly separated projection and view matrices,
+        kept in sync with MapLibre every frame). The hit returns a <code>faceIndex</code> and
+        world-space point, from which barycentric coordinates are computed.
+        <code>meshFeatures.getFeatures(faceIndex, barycoord)</code> from
+        <code>EXT_mesh_features</code> yields the feature ID, which is used to look up
+        all BAG attributes via <code>structuralMetadata.getPropertyTableData(tableIndex, featureId)</code>
+        from <code>EXT_structural_metadata</code>.
       </p>
     </div>
-    <div class="warning-box">
-      <strong>⚠ Not implemented – effort estimate: significant</strong><br>
-      Raycasting through a MapLibre custom layer requires careful synchronisation of
-      Three.js camera matrices with the MapLibre projection. Additionally, parsing the
-      <code>EXT_structural_metadata</code> binary buffer from inside a GLTFLoader extension plugin
-      adds non-trivial complexity. The data is available in the tiles, but the implementation
-      was intentionally left out to keep the page simple and focused on visualisation.
-      A future version could add this using the <code>GLTFExtensionsPlugin</code> from
-      <code>3d-tiles-renderer</code> combined with a <code>THREE.Raycaster</code>.
+    <div class="card">
+      <h3>Building selection highlight</h3>
+      <p>
+        The selected building is highlighted in orange using a <code>THREE.ShaderMaterial</code>
+        overlay mesh that reads the <code>_feature_id_0</code> vertex attribute and
+        <code>discard</code>s any fragment whose feature ID does not match the selected one.
+        This means only the geometry of the selected building is rendered in the overlay,
+        even though the whole tile mesh is reused as a geometry source.
+        Polygon offset (<code>factor -2, units -2</code>) prevents z-fighting with the original mesh.
+      </p>
     </div>
   </section>
 
@@ -200,8 +203,8 @@
         </tr>
         <tr>
           <td>3d-tiles-renderer</td>
-          <td>0.4.21</td>
-          <td><code>cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.21</code></td>
+          <td>0.4.23</td>
+          <td><code>cdn.jsdelivr.net/npm/3d-tiles-renderer@0.4.23</code></td>
         </tr>
         <tr>
           <td>Draco decoder</td>
@@ -267,6 +270,17 @@
         After the style loads (<code>style.load</code>), the Mapterhorn raster-DEM source
         is added dynamically along with a hillshade layer and <code>map.setTerrain()</code>.
         This combines the rich OpenFreeMap style with 3D terrain exaggeration.
+      </p>
+    </div>
+    <div class="card">
+      <h3>GLTFExtensionsPlugin</h3>
+      <p>
+        Instead of manually wiring up <code>GLTFLoader</code>, <code>DRACOLoader</code>, and
+        <code>KTX2Loader</code>, a single <code>GLTFExtensionsPlugin</code> registration handles
+        all three. It also automatically registers <code>GLTFStructuralMetadataExtension</code>
+        and <code>GLTFMeshFeaturesExtension</code>, which parse <code>EXT_structural_metadata</code>
+        and <code>EXT_mesh_features</code> and attach <code>meshFeatures</code> /
+        <code>structuralMetadata</code> to each mesh's <code>userData</code>.
       </p>
     </div>
     <div class="card">
